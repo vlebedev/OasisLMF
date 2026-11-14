@@ -179,3 +179,6 @@ data/
 # mac os
 .DS_Store/
 .DS_Store
+
+# Amp orb portals
+.amp/portals/*

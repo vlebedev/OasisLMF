@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb: a .venv with the pinned dev requirements and oasislmf installed editable.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+repo_root="$(pwd)"
+
+step() {
+  local name="$1"; shift
+  local start=$SECONDS
+  echo "==> $name"
+  "$@"
+  echo "<== $name ($((SECONDS - start))s)"
+}
+
+# The C/C++ toolchain builds the oasis_writecsv Cython extension.
+install_system_packages() {
+  local missing=()
+  for pkg in build-essential g++ zlib1g-dev; do
+    dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed" || missing+=("$pkg")
+  done
+  if ((${#missing[@]})); then
+    sudo apt-get update -q
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing[@]}"
+  fi
+}
+
+create_venv() {
+  [ -x .venv/bin/python ] || uv venv --python python3 .venv
+}
+
+# requirements.txt is gitignored and generated, as in CI. uv keeps existing pins when the
+# output file already exists, so a warm run does not churn versions.
+install_requirements() {
+  uv pip compile --quiet requirements.in --output-file requirements.txt
+  uv pip install --python .venv/bin/python -r requirements.txt
+}
+
+install_package() {
+  uv pip install --python .venv/bin/python -e .
+}
+
+# Make the venv the default python for Amp and supervised services started in the repo.
+persist_venv() {
+  local marker="# oasislmf orb: activate repository venv"
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >> "$HOME/.bash_profile" <<EOF
+
+$marker
+if [[ -z "\${VIRTUAL_ENV:-}" && -x "$repo_root/.venv/bin/python" ]]; then
+  export VIRTUAL_ENV="$repo_root/.venv"
+  export PATH="\$VIRTUAL_ENV/bin:\$PATH"
+fi
+EOF
+  fi
+}
+
+# Compiles the pytools Numba functions into oasislmf/**/__pycache__, so the snapshot ships a warm
+# cache. Warmed with NUMBA_BOUNDSCHECK=1 like CI: numba's cache key ignores that flag, so a cache
+# warmed without it would silently skip bounds checks in checked test runs.
+warm_numba_cache() {
+  # Some warmup tasks run the package's console scripts (evepy, ...) from PATH.
+  NUMBA_BOUNDSCHECK=1 PATH="$repo_root/.venv/bin:$PATH" oasislmf warmup
+}
+
+step "system packages" install_system_packages
+step "create .venv" create_venv
+step "dev requirements" install_requirements
+step "editable oasislmf" install_package
+step "persist venv in ~/.bash_profile" persist_venv
+step "numba warmup" warm_numba_cache
